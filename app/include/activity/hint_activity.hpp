@@ -6,8 +6,8 @@
 
 #include <borealis.hpp>
 
-class GalleryView;
-
+/// Shown instead of Home in applet mode: how to launch RumbleNX through a
+/// game so it gets the full memory it needs.
 class HintActivity : public brls::Activity {
 public:
     // Declare that the content of this activity is the given XML file
@@ -20,5 +20,8 @@ public:
     ~HintActivity();
 
 private:
-    BRLS_BIND(GalleryView, gallery, "hint/gallery");
+    BRLS_BIND(brls::Box, steps, "hint/steps");
+    BRLS_BIND(brls::Label, step1, "hint/step1");
+    BRLS_BIND(brls::Label, step2, "hint/step2");
+    BRLS_BIND(brls::Label, step3, "hint/step3");
 };

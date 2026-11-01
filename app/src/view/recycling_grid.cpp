@@ -421,7 +421,7 @@ void RecyclingGrid::setEmpty(std::string title, std::string icon) {
 }
 
 void RecyclingGrid::setError(std::string error) {
-    this->hintImage->setImageFromRes("img/net_error.png");
+    this->hintImage->setImageFromSVGRes("icon/ico-cloud.svg");
     this->hintLabel->setText(error);
     this->clearData();
 }
