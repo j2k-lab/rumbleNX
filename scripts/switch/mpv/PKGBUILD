@@ -1,0 +1,44 @@
+# Maintainer: Dave Murphy <davem@devkitpro.org>
+# Contributor: averne <averne381@gmail.com>
+# Contributor: Cpasjuste <cpasjuste@gmail.com>
+
+pkgbasename=libmpv
+pkgname=switch-${pkgbasename}
+provides=(switch-${pkgbasename})
+pkgver=0.36.0
+pkgrel=7
+pkgdesc='Command line video player (library only)'
+arch=('any')
+url='https://mpv.io/'
+license=('GPL')
+options=(!strip libtool staticlibs)
+source=(
+  "${pkgbasename}-${pkgver}.tar.gz::https://github.com/mpv-player/mpv/archive/v${pkgver}.tar.gz"
+  "deko3d.patch"
+  "kicknx_patch_mp_image.py"
+)
+sha256sums=(
+  '29abc44f8ebee013bb2f9fe14d80b30db19b534c679056e4851ceadf5a5e8bf6'
+  'SKIP'
+  'cbc1401d7ec00dc0cab4e29a1ed9af25aa80585ffba4c0f0c53d11eaf5681c1e'
+)
+makedepends=("dkp-toolchain-vars" "dkp-meson-scripts" "python" "meson")
+depends=('switch-ffmpeg' 'switch-mesa')
+groups=('switch-portlibs')
+
+prepare() {
+  cd "mpv-$pkgver"
+  patch -Np1 -i "$srcdir/deko3d.patch"
+  python "$srcdir/kicknx_patch_mp_image.py" video/mp_image.c
+}
+
+build() {
+  /opt/devkitpro/meson-cross.sh switch crossfile.txt build "mpv-$pkgver" \
+    -Dlibmpv=true -Dcplayer=false -Dtests=false -Dlua=disabled -Ddeko3d=disabled \
+    -Dplain-gl=enabled -Dsdl2=disabled -Dlibarchive=disabled -Dlibplacebo=disabled
+  meson compile -C build
+}
+
+package() {
+  DESTDIR="$pkgdir" meson install -C build
+}

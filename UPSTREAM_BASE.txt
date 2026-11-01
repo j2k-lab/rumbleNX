@@ -1,0 +1,13 @@
+Project foundation: kickNX 0.5.0
+kickNX commit: b5cb7abc66350d143a03c64becddad9d5558436b
+Upstream kickNX repository: https://github.com/j2k-lab/kickNX
+kickNX foundation: twiNX 0.9.1 / Switchfin 0.9.1
+Upstream twiNX repository: https://github.com/DomazinUS/twiNX
+Upstream Switchfin repository: https://github.com/dragonflylee/switchfin
+Upstream license: GPL-3.0 / Apache-2.0
+
+Vendored UI dependency: dragonflylee/borealis
+Commit: 7f03684805befffb1be18a1b2bdb81fa66945af2
+
+Vendored SVG dependency: sammycage/lunasvg
+Commit: f924651b85cac47dbe15f51a4aa320461fc1d07b

@@ -1,0 +1,347 @@
+#include "api/http.hpp"
+#include "utils/config.hpp"
+#include <borealis/core/logger.hpp>
+#include <curl/curl.h>
+#include <condition_variable>
+#include <mutex>
+#if defined(BOREALIS_USE_GXM)
+#include <mbedtls/platform.h>
+#include <psp2/gxm.h>
+#include <psp2/kernel/sysmem.h>
+static SceUID mempool_id = 0;
+static void* mempool_addr = nullptr;
+static size_t mempool_size = 20 * 1024 * 1024;
+static void* s_mspace = nullptr;
+int __attribute__((optimize("no-optimize-sibling-calls"))) malloc_finalize() {
+    if (s_mspace) sceClibMspaceDestroy(s_mspace);
+    if (mempool_addr) sceGxmUnmapMemory(mempool_addr);
+    if (mempool_id) sceKernelFreeMemBlock(mempool_id);
+    return 0;
+}
+
+int malloc_init() {
+    int res;
+    if (s_mspace) return 0;
+    mempool_id = sceKernelAllocMemBlock("curl", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW, mempool_size, nullptr);
+    sceKernelGetMemBlockBase(mempool_id, &mempool_addr);
+    if (!mempool_addr) goto error;
+    res = sceGxmMapMemory(mempool_addr, mempool_size, SCE_GXM_MEMORY_ATTRIB_RW);
+    if (res != SCE_OK) goto error;
+    s_mspace = sceClibMspaceCreate(mempool_addr, mempool_size);
+    if (!s_mspace) goto error;
+
+    return 0;
+error:
+    malloc_finalize();
+    return 1;
+}
+
+void __attribute__((optimize("no-optimize-sibling-calls"))) * sce_malloc(size_t size) {
+    if (!s_mspace) malloc_init();
+    return sceClibMspaceMalloc(s_mspace, size);
+}
+
+void __attribute__((optimize("no-optimize-sibling-calls"))) sce_free(void* ptr) {
+    if (!ptr || !s_mspace) return;
+    sceClibMspaceFree(s_mspace, ptr);
+}
+
+void __attribute__((optimize("no-optimize-sibling-calls"))) * sce_calloc(size_t nelem, size_t size) {
+    if (!s_mspace) malloc_init();
+    return sceClibMspaceCalloc(s_mspace, nelem, size);
+}
+
+void __attribute__((optimize("no-optimize-sibling-calls"))) * sce_realloc(void* ptr, size_t size) {
+    if (!s_mspace) malloc_init();
+    return sceClibMspaceRealloc(s_mspace, ptr, size);
+}
+
+char __attribute__((optimize("no-optimize-sibling-calls"))) * sce_strdup(const char* str) {
+    size_t len;
+    char* newstr;
+    if (!str) return (char*)nullptr;
+    len = strlen(str) + 1;
+    newstr = (char*)sce_malloc(len);
+    if (!newstr) return (char*)nullptr;
+    sceClibMemcpy(newstr, str, len);
+    return newstr;
+}
+#endif
+
+#ifndef CURL_PROGRESSFUNC_CONTINUE
+#define CURL_PROGRESSFUNC_CONTINUE 0x10000001
+#endif
+
+class curl_error : public std::exception {
+public:
+    explicit curl_error(CURLcode code) : m(curl_easy_strerror(code)) {}
+    explicit curl_error(const std::string& arg) : m(arg) {}
+    const char* what() const noexcept override { return m.c_str(); }
+
+private:
+    std::string m;
+};
+
+static const std::string& user_agent = AppVersion::getUserAgent();
+
+namespace {
+
+// Counting gate on how many requests may be connected at the same time.
+class TransferGate {
+public:
+    explicit TransferGate(int slots) : free(slots) {}
+
+    void acquire() {
+        std::unique_lock<std::mutex> lock(mutex);
+        cond.wait(lock, [this]() { return free > 0; });
+        --free;
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            ++free;
+        }
+        cond.notify_one();
+    }
+
+private:
+    std::mutex mutex;
+    std::condition_variable cond;
+    int free;
+};
+
+// The Switch's TLS service only gives an app a handful of connections, and
+// past that new handshakes fail with "SSL connect error". Bursts of
+// thumbnails (e.g. refreshing Home quickly) used to take every slot, so
+// Rumble page and API requests (home rows, playback, sign-in) failed. At most
+// 4 requests run at once, and background image downloads may use only 3 of
+// them, so a page or API request always has a slot.
+TransferGate& allTransfers() {
+    static TransferGate gate(4);
+    return gate;
+}
+
+TransferGate& imageTransfers() {
+    static TransferGate gate(3);
+    return gate;
+}
+
+}  // namespace
+
+/// @brief curl context
+
+HTTP::HTTP() : chunk(nullptr) {
+    static struct Global {
+        Global() {
+#ifdef BOREALIS_USE_GXM
+            mbedtls_platform_set_calloc_free(sce_calloc, sce_free);
+            curl_global_init_mem(CURL_GLOBAL_DEFAULT, sce_malloc, sce_free, sce_realloc, sce_strdup, sce_calloc);
+#else
+            CURLcode rc = curl_global_init(CURL_GLOBAL_ALL);
+            brls::Logger::debug("curl global init {}", std::to_string(rc));
+#endif
+            // Each ThreadPool worker owns one persistent easy handle. Keep its
+            // DNS cache private to that worker instead of sharing a CURLSH DNS
+            // cache across threads. libcurl requires explicit lock/unlock
+            // callbacks for cross-thread shared data; the old unlocked share
+            // could corrupt the host cache during concurrent image requests.
+        }
+        ~Global() {
+            curl_global_cleanup();
+            brls::Logger::debug("curl cleanup");
+        }
+        // Avoids initalization order problems
+        std::mutex init_lock;
+    } global;
+
+    global.init_lock.lock();
+    this->easy = curl_easy_init();
+    global.init_lock.unlock();
+
+    curl_easy_setopt(this->easy, CURLOPT_USERAGENT, user_agent.c_str());
+    curl_easy_setopt(this->easy, CURLOPT_FOLLOWLOCATION, 1L);
+    // enable all supported built-in compressions
+    curl_easy_setopt(this->easy, CURLOPT_ACCEPT_ENCODING, "");
+    curl_easy_setopt(this->easy, CURLOPT_VERBOSE, 0L);
+    // Persistent worker handles must begin each request without libcurl's
+    // terminal progress meter. Cancellable requests enable only our callback.
+    curl_easy_setopt(this->easy, CURLOPT_NOPROGRESS, 1L);
+    curl_easy_setopt(this->easy, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(this->easy, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(this->easy, CURLOPT_TCP_NODELAY, 1L);
+    curl_easy_setopt(this->easy, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    // The Switch allows an app only a few TLS connections at once. Image
+    // workers keep their handle for the app's lifetime, and by default each
+    // one caches an open connection to every image host it has used. With
+    // enough hosts those idle connections use up the limit and new requests
+    // (login, playback URLs) fail with "SSL connect error". Keep one idle
+    // connection per handle, so the image workers hold at most 4 between
+    // them, and drop idle ones after a minute.
+    curl_easy_setopt(this->easy, CURLOPT_MAXCONNECTS, 1L);
+#if LIBCURL_VERSION_NUM >= 0x074100
+    curl_easy_setopt(this->easy, CURLOPT_MAXAGE_CONN, 60L);
+#endif
+#if LIBCURL_VERSION_NUM >= 0x071900 && !defined(__PS4__)
+    curl_easy_setopt(this->easy, CURLOPT_TCP_KEEPALIVE, 1L);
+#endif
+}
+
+HTTP::~HTTP() {
+    if (this->chunk != nullptr) curl_slist_free_all(this->chunk);
+    if (this->easy != nullptr) curl_easy_cleanup(this->easy);
+}
+
+void HTTP::set_user_agent(const std::string& agent) { curl_easy_setopt(this->easy, CURLOPT_USERAGENT, agent.c_str()); }
+
+void HTTP::add_header(const std::string& header) { this->chunk = curl_slist_append(this->chunk, header.c_str()); }
+
+void HTTP::set_option(const Header& hs) {
+    curl_slist* chunk = nullptr;
+    for (auto& h : hs) {
+        chunk = curl_slist_append(chunk, h.c_str());
+    }
+    curl_slist_free_all(this->chunk);
+    this->chunk = chunk;
+    if (chunk != nullptr) curl_easy_setopt(this->easy, CURLOPT_HTTPHEADER, chunk);
+}
+
+void HTTP::set_option(const Range& r) {
+    const std::string range_str = std::to_string(r.start) + "-" + std::to_string(r.end);
+    curl_easy_setopt(this->easy, CURLOPT_RANGE, range_str.c_str());
+}
+
+void HTTP::set_option(const Timeout& t) {
+    curl_easy_setopt(this->easy, CURLOPT_TIMEOUT_MS, t.timeout);
+    curl_easy_setopt(this->easy, CURLOPT_CONNECTTIMEOUT_MS, t.timeout);
+}
+
+int HTTP::easy_progress_cb(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow) {
+    HTTP* ctx = reinterpret_cast<HTTP*>(clientp);
+    if (ctx->report_progress)
+        ctx->event.fire(dltotal, dlnow);
+
+    // Returning CURL_PROGRESSFUNC_CONTINUE invokes libcurl's built-in
+    // terminal meter. Returning zero continues silently.
+    return ctx->is_cancel && ctx->is_cancel->load() ? 1 : 0;
+}
+
+void HTTP::set_option(const Cancel& c) {
+    this->is_cancel = c;
+    this->event.clear();
+    this->report_progress = false;
+    curl_easy_setopt(this->easy, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(this->easy, CURLOPT_XFERINFOFUNCTION, easy_progress_cb);
+    curl_easy_setopt(this->easy, CURLOPT_XFERINFODATA, this);
+}
+
+void HTTP::set_option(Progress::Callback p) {
+    this->event.clear();
+    this->event.subscribe(std::move(p));
+    this->report_progress = true;
+    curl_easy_setopt(this->easy, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(this->easy, CURLOPT_XFERINFOFUNCTION, easy_progress_cb);
+    curl_easy_setopt(this->easy, CURLOPT_XFERINFODATA, this);
+}
+
+void HTTP::set_option(const Cookies& cookies) {
+    std::stringstream ss;
+    char* escaped;
+    for (auto& c : cookies) {
+        ss << c.name << "=";
+        escaped = curl_easy_escape(this->easy, c.value.c_str(), c.value.size());
+        if (escaped) {
+            ss << escaped;
+            curl_free(escaped);
+        }
+        ss << "; ";
+    }
+    curl_easy_setopt(this->easy, CURLOPT_COOKIE, ss.str().c_str());
+}
+
+void HTTP::set_basic_auth(const std::string& user, const std::string& passwd) {
+    curl_easy_setopt(this->easy, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+    curl_easy_setopt(this->easy, CURLOPT_USERNAME, user.c_str());
+    curl_easy_setopt(this->easy, CURLOPT_PASSWORD, passwd.c_str());
+}
+
+size_t HTTP::easy_write_cb(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    std::ostream* ctx = reinterpret_cast<std::ostream*>(userdata);
+    size_t count = size * nmemb;
+    ctx->write(ptr, count);
+    return count;
+}
+
+int HTTP::perform(std::ostream* body) {
+    curl_easy_setopt(this->easy, CURLOPT_WRITEFUNCTION, easy_write_cb);
+    curl_easy_setopt(this->easy, CURLOPT_WRITEDATA, body);
+    curl_easy_setopt(this->easy, CURLOPT_PROXY, PROXY_STATUS ? PROXY.c_str() : nullptr);
+
+    CURLcode res = CURLE_ABORTED_BY_CALLBACK;
+    if (pooled) imageTransfers().acquire();
+    allTransfers().acquire();
+    // A thumbnail scrolled away while waiting for a slot is skipped.
+    if (!is_cancel || !is_cancel->load()) res = curl_easy_perform(this->easy);
+    allTransfers().release();
+    if (pooled) imageTransfers().release();
+
+    // ThreadPool workers reuse HTTP handles. Do not leak cancellation,
+    // subscribers, or progress-meter state into the next image request.
+    curl_easy_setopt(this->easy, CURLOPT_NOPROGRESS, 1L);
+    curl_easy_setopt(this->easy, CURLOPT_XFERINFOFUNCTION, nullptr);
+    curl_easy_setopt(this->easy, CURLOPT_XFERINFODATA, nullptr);
+    this->event.clear();
+    this->is_cancel.reset();
+    this->report_progress = false;
+
+    if (res != CURLE_OK) throw curl_error(res);
+
+    long status_code = 0;
+    curl_easy_getinfo(this->easy, CURLINFO_RESPONSE_CODE, &status_code);
+    return status_code;
+}
+
+std::string HTTP::encode_form(const Form& form) {
+    std::ostringstream ss;
+    char* escaped;
+    for (auto it = form.begin(); it != form.end(); ++it) {
+        if (it->second.empty()) continue;
+        if (it != form.begin()) ss << '&';
+        escaped = curl_escape(it->second.c_str(), it->second.size());
+        ss << it->first << '=' << escaped;
+        curl_free(escaped);
+    }
+    return ss.str();
+}
+
+void HTTP::_get(const std::string& url, std::ostream* out) {
+    curl_easy_setopt(this->easy, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(this->easy, CURLOPT_HTTPGET, 1L);
+    int code = this->perform(out);
+    if (code >= 400) throw curl_error(fmt::format("http status {}", code));
+}
+
+bool HTTP::getinfo(char** arg) { return curl_easy_getinfo(this->easy, CURLINFO_CONTENT_TYPE, arg) == CURLE_OK; }
+
+int HTTP::propfind(const std::string& url, std::ostream* out) {
+    curl_easy_setopt(this->easy, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(this->easy, CURLOPT_CUSTOMREQUEST, "PROPFIND");
+    return this->perform(out);
+}
+
+std::string HTTP::_post(const std::string& url, const std::string& data) {
+    std::ostringstream body;
+    curl_easy_setopt(this->easy, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(this->easy, CURLOPT_POSTFIELDS, data.c_str());
+    curl_easy_setopt(this->easy, CURLOPT_POSTFIELDSIZE, data.size());
+    int code = this->perform(&body);
+    if (code >= 400) throw curl_error(fmt::format("http status {}", code));
+    return body.str();
+}
+
+void HTTP::_delete(const std::string& url, std::ostream* out) {
+    curl_easy_setopt(this->easy, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(this->easy, CURLOPT_CUSTOMREQUEST, "DELETE");
+    int code = this->perform(out);
+    if (code >= 400) throw curl_error(fmt::format("http status {}", code));
+}
