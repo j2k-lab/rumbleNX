@@ -88,8 +88,9 @@ streams, videos, live chat with rants, and Rumble sign-in.
 
 ## Installation
 
-1. Build `RumbleNX.nro` (see [Building](#building-from-source)) or download a
-   release if your fork publishes one.
+1. Download `RumbleNX.nro` from the
+   [releases page](https://github.com/j2k-lab/rumbleNX/releases), or build it
+   yourself (see [Building](#building-from-source)).
 2. Copy it to the SD card:
 
    ```text
@@ -111,7 +112,8 @@ streams, videos, live chat with rants, and Rumble sign-in.
 | `/config/RumbleNX/orientation.json`, `haptics.json` | Portrait-mode and keyboard-haptics settings |
 | `/switch/RumbleNX/config.json` | Colour theme and app configuration |
 
-Updating is just replacing the NRO; these files are kept.
+Updating is just replacing the NRO; these files are kept. **About → Check
+for updates** tells you when a newer release is out.
 
 ## Decoder modes
 

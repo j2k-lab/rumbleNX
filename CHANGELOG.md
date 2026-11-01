@@ -27,7 +27,7 @@ hardware.
 - **Sending chat** when signed in, with Rumble's message length limit and cooldown, from the on-screen keyboard with an emoji picker (Recent and All) or the Nintendo keyboard.
 - **Rumble sign-in** with username or e-mail and password, including two-factor codes by e-mail, text message or authenticator app. The password is sent only as Rumble's salted hash and never stored.
 - **Rumble theme**, RumbleNX logo, icon, loading animation and placeholder artwork.
-- Optional About-page update check, enabled at build time with `RUMBLENX_RELEASE_REPOSITORY`.
+- About-page update check against the j2k-lab/rumbleNX GitHub releases (`RUMBLENX_RELEASE_REPOSITORY` changes or turns it off).
 
 ### Changed
 - Renamed the app, NRO, package, folders and build options from kickNX to RumbleNX (`/switch/RumbleNX/RumbleNX.nro`, `/config/RumbleNX/`, `RUMBLENX_FFMPEG_ROOT`).

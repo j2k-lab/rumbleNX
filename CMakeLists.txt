@@ -266,7 +266,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
 )
 # Optional "owner/name" GitHub repository whose releases About checks for
 # updates. Empty (the default) hides the update check.
-set(RUMBLENX_RELEASE_REPOSITORY "" CACHE STRING "GitHub owner/name for RumbleNX update checks")
+set(RUMBLENX_RELEASE_REPOSITORY "j2k-lab/rumbleNX" CACHE STRING "GitHub owner/name for RumbleNX update checks (empty turns them off)")
 if (RUMBLENX_RELEASE_REPOSITORY)
     target_compile_definitions(${PROJECT_NAME} PRIVATE APP_RELEASE_REPOSITORY=${RUMBLENX_RELEASE_REPOSITORY})
 endif ()

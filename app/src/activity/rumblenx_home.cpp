@@ -1532,7 +1532,11 @@ void checkForUpdates() {
             }
         } catch (const std::exception& ex) {
             brls::Logger::error("update check failed: {}", ex.what());
-            message = "Couldn't check for updates. Check your internet connection and try again.";
+            // GitHub answers 404 while a repository has no releases.
+            if (std::string(ex.what()).find("http status 404") != std::string::npos)
+                message = "No RumbleNX releases have been published yet.";
+            else
+                message = "Couldn't check for updates. Check your internet connection and try again.";
         }
 
         brls::sync([message]() {

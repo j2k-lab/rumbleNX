@@ -22,7 +22,8 @@ if [[ -n "${RUMBLENX_FFMPEG_ROOT:-}" ]]; then
   cmake_args+=("-DRUMBLENX_FFMPEG_ROOT=$RUMBLENX_FFMPEG_ROOT")
 fi
 
-if [[ -n "${RUMBLENX_RELEASE_REPOSITORY:-}" ]]; then
+# Set but empty turns the About-page update check off.
+if [[ -n "${RUMBLENX_RELEASE_REPOSITORY+set}" ]]; then
   cmake_args+=("-DRUMBLENX_RELEASE_REPOSITORY=$RUMBLENX_RELEASE_REPOSITORY")
 fi
 

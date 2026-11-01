@@ -132,17 +132,20 @@ only be symbolicated accurately with the ELF from the exact same build.
 
 ## Update checks
 
-The About page can offer a *Check for updates* button that asks GitHub for
-the newest release of a repository. It is hidden unless you name that
-repository when building:
+The About page has a *Check for updates* button that asks GitHub for the
+newest release of [j2k-lab/rumbleNX](https://github.com/j2k-lab/rumbleNX).
+A fork can point it at its own repository, or hide the button with an empty
+value:
 
 ```bash
 RUMBLENX_RELEASE_REPOSITORY=owner/name ./build-switch.sh
+RUMBLENX_RELEASE_REPOSITORY= ./build-switch.sh
 ```
 
 With Docker, pass it into the container with
 `-e RUMBLENX_RELEASE_REPOSITORY=owner/name`. CMake users can set the
-`RUMBLENX_RELEASE_REPOSITORY` cache variable directly.
+`RUMBLENX_RELEASE_REPOSITORY` cache variable directly. An existing build
+directory keeps the value it was configured with until you change it.
 
 ## Dependency warning
 
