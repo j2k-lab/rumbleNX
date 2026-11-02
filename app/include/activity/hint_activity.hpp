@@ -21,6 +21,8 @@ public:
 
 private:
     BRLS_BIND(brls::Box, steps, "hint/steps");
+    BRLS_BIND(brls::Label, reason, "hint/reason");
+    BRLS_BIND(brls::Label, forwarder, "hint/forwarder");
     BRLS_BIND(brls::Label, step1, "hint/step1");
     BRLS_BIND(brls::Label, step2, "hint/step2");
     BRLS_BIND(brls::Label, step3, "hint/step3");

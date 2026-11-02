@@ -147,6 +147,21 @@ With Docker, pass it into the container with
 `RUMBLENX_RELEASE_REPOSITORY` cache variable directly. An existing build
 directory keeps the value it was configured with until you change it.
 
+## Publishing a release
+
+The in-app updater installs the newest GitHub release of that repository:
+
+1. Raise `VERSION_MAJOR` / `VERSION_MINOR` / `VERSION_ALTER` in
+   `CMakeLists.txt` and add a `CHANGELOG.md` entry.
+2. Build `build_switch/RumbleNX.nro`.
+3. Create a GitHub release whose tag is the version (for example `v0.2.0`)
+   and attach the NRO as an asset named exactly **`RumbleNX.nro`**. Don't mark
+   it as a pre-release; the updater only looks at the latest full release.
+
+GitHub records each asset's SHA-256 digest, and RumbleNX refuses a download
+that doesn't match it, has the wrong size, or isn't an NRO. A release without
+a `RumbleNX.nro` asset is still announced, with a link to the releases page.
+
 ## Dependency warning
 
 When no custom FFmpeg root is available, CMake uses the FFmpeg libraries

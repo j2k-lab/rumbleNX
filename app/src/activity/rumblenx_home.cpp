@@ -9,6 +9,7 @@
 #include "utils/image.hpp"
 #include "utils/theme.hpp"
 #include "utils/thread.hpp"
+#include "utils/updater.hpp"
 #include "view/h_recycling.hpp"
 #include "view/rumble_cards.hpp"
 #include "view/theme_header.hpp"
@@ -164,6 +165,11 @@ void showMessage(const std::string& message) {
     dialog->addButton("OK", []() {});
     dialog->open();
 }
+
+/// Set by the quiet startup check; offered once Home is on top.
+std::optional<rumblenx::updater::Release> pendingUpdate;
+
+void offerUpdate(const rumblenx::updater::Release& release);
 
 }  // namespace
 
@@ -598,6 +604,30 @@ RumbleNXHome::RumbleNXHome() {
     brls::sync([this]() {
         if (isActiveActivity()) brls::Application::giveFocus(refreshButton);
     });
+
+    static bool startupUpdateCheckDone = false;
+    if (!startupUpdateCheckDone && rumblenx::updater::checkOnStartup() &&
+        !AppVersion::getReleaseRepository().empty()) {
+        startupUpdateCheckDone = true;
+        // After Home has loaded, and quietly: failures are only logged.
+        brls::delay(STARTUP_UPDATE_DELAY_MS, []() {
+            rumblenx::updater::checkAsync(
+                [](std::optional<rumblenx::updater::Release> release) {
+                    if (!release) return;
+                    pendingUpdate = std::move(release);
+                    if (auto* home = RumbleNXHome::getInstance()) home->offerPendingUpdate();
+                },
+                [](const std::string&) {});
+        });
+    }
+}
+
+void RumbleNXHome::offerPendingUpdate() {
+    // Never on top of playback or another screen; willAppear retries.
+    if (!pendingUpdate || !isActiveActivity()) return;
+    const rumblenx::updater::Release release = std::move(*pendingUpdate);
+    pendingUpdate.reset();
+    offerUpdate(release);
 }
 
 RumbleNXHome::~RumbleNXHome() {
@@ -646,6 +676,10 @@ void RumbleNXHome::willAppear(bool resetState) {
     if (rumble::follows::consumeChanged()) refreshFollowing();
     // A theme chosen while another screen was on top is applied on return.
     if (themeRebuildPending) brls::delay(THEME_REBUILD_DELAY_MS, []() { RumbleNXHome::rebuildForTheme(); });
+    // An update found while another screen was on top.
+    if (pendingUpdate) brls::sync([]() {
+        if (auto* home = RumbleNXHome::getInstance()) home->offerPendingUpdate();
+    });
 }
 
 // ================================================================= theme picker
@@ -1477,73 +1511,177 @@ void RumbleNXHome::showHomeData(rumble::HomeData data) {
 
 namespace {
 
-/// The first "X.Y.Z" in text as numbers, e.g. "RumbleNX 0.1.0" -> {0, 1, 0}.
-std::vector<int> parseVersion(const std::string& text) {
-    std::vector<int> parts;
-    size_t i = 0;
-    while (i < text.size() && !std::isdigit(static_cast<unsigned char>(text[i]))) ++i;
-    while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
-        int value = 0;
-        while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
-            value = value * 10 + (text[i] - '0');
-            ++i;
+/// Download, check and install progress for a self-update.
+class UpdatePage : public brls::Box {
+public:
+    explicit UpdatePage(rumblenx::updater::Release value) : release(std::move(value)) {
+        const auto& palette = rumblenx::theme::current();
+        this->setAxis(brls::Axis::COLUMN);
+        this->setDimensions(brls::Application::contentWidth, brls::Application::contentHeight);
+        this->setJustifyContent(brls::JustifyContent::CENTER);
+        this->setAlignItems(brls::AlignItems::CENTER);
+        this->setBackgroundColor(palette.background);
+
+        auto* title = new brls::Label();
+        title->setText("Updating RumbleNX");
+        title->setFontSize(34);
+        title->setTextColor(palette.textPrimary);
+        this->addView(title);
+
+        auto* versions = new brls::Label();
+        versions->setText(AppVersion::getVersion() + "  →  " + release.version);
+        versions->setFontSize(20);
+        versions->setTextColor(palette.textSecondary);
+        versions->setMarginTop(8);
+        versions->setMarginBottom(34);
+        this->addView(versions);
+
+        auto* track = new brls::Box();
+        track->setWidth(TRACK_WIDTH);
+        track->setHeight(14);
+        track->setCornerRadius(7);
+        track->setBackgroundColor(palette.surfaceAlt);
+        this->addView(track);
+
+        fill = new brls::Box();
+        fill->setWidth(0);
+        fill->setHeight(14);
+        fill->setCornerRadius(7);
+        fill->setBackgroundColor(palette.accent);
+        track->addView(fill);
+
+        status = new brls::Label();
+        status->setFontSize(19);
+        status->setTextColor(palette.textSecondary);
+        status->setMarginTop(18);
+        status->setMarginBottom(34);
+        this->addView(status);
+
+        button = makeButton("Cancel", &buttonLabel);
+        button->setMarginRight(0);
+        button->registerClickAction([this](brls::View*) {
+            onButton();
+            return true;
+        });
+        this->addView(button);
+
+        this->registerAction("Cancel", brls::BUTTON_B, [this](brls::View*) {
+            onBack();
+            return true;
+        });
+        start();
+    }
+
+    brls::View* getDefaultFocus() override { return button; }
+
+private:
+    enum class State { Downloading, Installed, Failed };
+    static constexpr float TRACK_WIDTH = 620.0f;
+
+    void start() {
+        state = State::Downloading;
+        cancel = std::make_shared<std::atomic_bool>(false);
+        status->setText("Starting the download…");
+        buttonLabel->setText("Cancel");
+        fill->setWidth(0);
+        this->ptrLock();
+        rumblenx::updater::installAsync(
+            release,
+            [this](int64_t done, int64_t total) {
+                if (total <= 0) return;
+                const float fraction = std::clamp(static_cast<float>(done) / static_cast<float>(total), 0.0f, 1.0f);
+                fill->setWidth(TRACK_WIDTH * fraction);
+                status->setText(fmt::format("Downloading… {:.1f} of {:.1f} MB", done / 1048576.0, total / 1048576.0));
+            },
+            [this]() {
+                this->ptrUnlock();
+                state = State::Installed;
+                fill->setWidth(TRACK_WIDTH);
+                status->setText("RumbleNX " + release.version + " is installed.");
+                buttonLabel->setText("Restart now");
+            },
+            [this](const std::string& error) {
+                this->ptrUnlock();
+                state = State::Failed;
+                status->setText(error + "\nRumbleNX " + AppVersion::getVersion() + " is unchanged.");
+                buttonLabel->setText("Back");
+            },
+            cancel);
+    }
+
+    void onButton() {
+        switch (state) {
+            case State::Downloading:
+                cancel->store(true);
+                status->setText("Cancelling…");
+                break;
+            case State::Installed:
+                if (!rumblenx::updater::restart())
+                    showMessage("Close RumbleNX and open it again from the Homebrew Menu to use version " +
+                                release.version + ".");
+                break;
+            case State::Failed:
+                brls::Application::popActivity();
+                break;
         }
-        parts.push_back(value);
-        if (i + 1 < text.size() && text[i] == '.' && std::isdigit(static_cast<unsigned char>(text[i + 1]))) ++i;
-        else break;
     }
-    return parts;
+
+    void onBack() {
+        // The page stays until the download stops, so callbacks never
+        // outlive it.
+        if (state == State::Downloading) {
+            onButton();
+        } else {
+            brls::Application::popActivity();
+        }
+    }
+
+    rumblenx::updater::Release release;
+    State state = State::Downloading;
+    HTTP::Cancel cancel;
+    brls::Box* fill = nullptr;
+    brls::Label* status = nullptr;
+    brls::Label* buttonLabel = nullptr;
+    ActionButton* button = nullptr;
+};
+
+void startUpdate(const rumblenx::updater::Release& release) {
+    brls::Application::pushActivity(new brls::Activity(new UpdatePage(release)));
 }
 
-std::string joinVersion(const std::vector<int>& parts) {
-    std::string out;
-    for (size_t i = 0; i < parts.size(); ++i) {
-        if (i) out += '.';
-        out += std::to_string(parts[i]);
+std::string releasesPage() { return "github.com/" + AppVersion::getReleaseRepository() + "/releases"; }
+
+/// Asks whether to install a newer release, or says where to get it when
+/// this copy can't update itself.
+void offerUpdate(const rumblenx::updater::Release& release) {
+    const std::string available =
+        "RumbleNX " + release.version + " is available. You have " + AppVersion::getVersion() + ".";
+    if (!release.installable() || !rumblenx::updater::canInstall()) {
+        showMessage(available + "\n\nDownload it from " + releasesPage());
+        return;
     }
-    return out;
+    auto* dialog =
+        new brls::Dialog(available + "\n\nDownload and install it now? It takes a minute, then RumbleNX restarts.");
+    dialog->addButton("Later", []() {});
+    dialog->addButton("Update", [release]() { brls::sync([release]() { startUpdate(release); }); });
+    dialog->open();
 }
 
-/// Asks GitHub for the newest release of this build's repository and tells
-/// the viewer whether it is newer. Only runs when the viewer asks.
+/// About → Check for updates.
 void checkForUpdates() {
     static std::atomic_bool checking{false};
-    const std::string repository = AppVersion::getReleaseRepository();
-    if (repository.empty() || checking.exchange(true)) return;
+    if (AppVersion::getReleaseRepository().empty() || checking.exchange(true)) return;
     brls::Application::notify("Checking for updates…");
-
-    ThreadPool::instance().submit([repository](HTTP&) {
-        std::string message;
-        try {
-            const auto release = nlohmann::json::parse(HTTP::get(
-                "https://api.github.com/repos/" + repository + "/releases/latest",
-                HTTP::Header{"Accept: application/vnd.github+json"}, HTTP::Timeout{10000}));
-            auto latest = parseVersion(release.value("tag_name", ""));
-            if (latest.empty()) latest = parseVersion(release.value("name", ""));
-            const auto current = parseVersion(AppVersion::getVersion());
-
-            if (latest.empty()) {
-                message = "Couldn't read the latest version. Check github.com/" + repository + "/releases.";
-            } else if (latest > current) {
-                message = "RumbleNX " + joinVersion(latest) + " is available. You have " + AppVersion::getVersion() +
-                          ".\n\nDownload it from github.com/" + repository + "/releases";
-            } else {
-                message = "You're on the latest version (" + AppVersion::getVersion() + ").";
-            }
-        } catch (const std::exception& ex) {
-            brls::Logger::error("update check failed: {}", ex.what());
-            // GitHub answers 404 while a repository has no releases.
-            if (std::string(ex.what()).find("http status 404") != std::string::npos)
-                message = "No RumbleNX releases have been published yet.";
-            else
-                message = "Couldn't check for updates. Check your internet connection and try again.";
-        }
-
-        brls::sync([message]() {
+    rumblenx::updater::checkAsync(
+        [](std::optional<rumblenx::updater::Release> release) {
             checking.store(false);
-            showMessage(message);
+            if (release) offerUpdate(*release);
+            else showMessage("You're on the latest version (" + AppVersion::getVersion() + ").");
+        },
+        [](const std::string& error) {
+            checking.store(false);
+            showMessage(error);
         });
-    });
 }
 
 }  // namespace
@@ -1602,6 +1740,18 @@ void RumbleNXHome::showAbout() {
             return true;
         });
         heading->addView(updateButton);
+
+        brls::Label* startupLabel = nullptr;
+        auto startupText = []() {
+            return std::string("Check at startup: ") + (rumblenx::updater::checkOnStartup() ? "On" : "Off");
+        };
+        auto* startupButton = makeButton(startupText(), &startupLabel);
+        startupButton->registerClickAction([startupLabel, startupText](brls::View*) {
+            rumblenx::updater::setCheckOnStartup(!rumblenx::updater::checkOnStartup());
+            startupLabel->setText(startupText());
+            return true;
+        });
+        heading->addView(startupButton);
     }
 
     auto* backButton = makeButton("Back");

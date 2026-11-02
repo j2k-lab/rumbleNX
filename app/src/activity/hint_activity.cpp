@@ -17,6 +17,14 @@ HintActivity::HintActivity() {
 void HintActivity::onContentAvailable() {
     brls::Logger::debug("HintActivityActivity: onContentAvailable");
 
+    reason->setText(
+        "Opened from the Album, homebrew runs as an applet and gets only a small, fixed share of the "
+        "Switch's memory. Streaming video needs far more than that, so RumbleNX can't load or play "
+        "Rumble reliably and would run out of memory or crash.");
+    forwarder->setText(
+        "Tip: use Sphaira to install an NRO forwarder for RumbleNX. It puts RumbleNX on the HOME "
+        "Menu so it always opens with full memory, without going through a game.");
+
     step1->setText("1.  " + "main/hints/hint1"_i18n);
     step2->setText("2.  " + "main/hints/hint2"_i18n);
     step3->setText("3.  " + "main/hints/hint3"_i18n);

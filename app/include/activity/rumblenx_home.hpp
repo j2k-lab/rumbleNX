@@ -53,6 +53,8 @@ private:
     void clearHero();
     void showHomeData(rumble::HomeData data);
     void showFollowing(rumble::FollowingData data);
+    /// Offers an update found by the startup check once Home is on top.
+    void offerPendingUpdate();
 
     uint64_t beginBrowsingRequest(const std::string& message);
     bool finishBrowsingRequest(uint64_t requestId);
@@ -132,4 +134,5 @@ private:
     inline static RumbleNXHome* instance = nullptr;
     inline static bool themeRebuildPending = false;
     static constexpr long THEME_REBUILD_DELAY_MS = 500;
+    static constexpr long STARTUP_UPDATE_DELAY_MS = 4000;
 };

@@ -112,8 +112,12 @@ streams, videos, live chat with rants, and Rumble sign-in.
 | `/config/RumbleNX/orientation.json`, `haptics.json` | Portrait-mode and keyboard-haptics settings |
 | `/switch/RumbleNX/config.json` | Colour theme and app configuration |
 
-Updating is just replacing the NRO; these files are kept. **About → Check
-for updates** tells you when a newer release is out.
+RumbleNX updates itself. A few seconds after it starts it checks GitHub for a
+newer release and offers to install it; **About → Check for updates** does
+the same on request, and **Check at startup** turns the automatic check off.
+The new NRO is downloaded next to the old one, checked against the size and
+SHA-256 checksum GitHub publishes, swapped in, and RumbleNX restarts. Updating
+by hand (replacing the NRO) works too. Your settings files are kept either way.
 
 ## Decoder modes
 
@@ -141,9 +145,6 @@ Every request identifies itself honestly as
 
 ## Known limitations
 
-- **Not yet tested on Switch hardware.** The Rumble parsers are unit-tested
-  against real Rumble pages, but this first port has not been built and run
-  on a console yet.
 - Rumble can change its pages or services at any time, which can break
   browsing, playback or chat until RumbleNX is updated.
 - **Following is local.** Rumble's follow button has no documented API, so
@@ -156,8 +157,12 @@ Every request identifies itself honestly as
   to bypass these checks.
 - Like kickNX, TLS certificate verification is disabled for HTTPS requests
   (the Switch has no system CA bundle in this build). Connections are
-  encrypted but the server is not authenticated.
+  encrypted but the server is not authenticated. That includes update
+  downloads: the checksum comes over the same connection, so it catches
+  corrupted downloads rather than a deliberate network attack.
 - Chat timestamps are shown in UTC.
+- Self-updating needs RumbleNX to be started from the Homebrew Menu as an
+  NRO on the SD card; other launch methods get a link to the releases page.
 - Only the Nintendo Switch build is maintained; the desktop and other
   platform packaging inherited from Switchfin is untested.
 

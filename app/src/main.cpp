@@ -5,6 +5,7 @@
 #include "utils/debug_log.hpp"
 #include "utils/orientation.hpp"
 #include "utils/theme.hpp"
+#include "utils/updater.hpp"
 
 #include "view/svg_image.hpp"
 #include "view/custom_button.hpp"
@@ -45,6 +46,8 @@ void cleanWatchLaterCache(const std::string& directory) {
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // hbloader passes the NRO it started; the updater replaces that file.
+    if (argc > 0 && argv[0]) rumblenx::updater::setExecutablePath(argv[0]);
 #if defined(RUMBLENX_PLAYBACK_DEBUG)
     // switch_wrapper.c has already connected stdio to nxlink before main().
     // Disable buffering so the last record before a fatal crash reaches the PC.
